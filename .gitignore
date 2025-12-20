@@ -1,0 +1,13 @@
+**/__pycache__/
+logfile
+data.txt
+battery.txt
+database.json
+.seq
+.seq_number
+.idea/*
+ttgwlib.egg-info
+certs/
+build/
+.vscode/
+venv/
