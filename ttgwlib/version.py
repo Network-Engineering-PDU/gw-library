@@ -1,0 +1,2 @@
+VERSION = "1.12.2"
+FW_VERSION = "1.5.0"
