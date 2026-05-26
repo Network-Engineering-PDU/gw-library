@@ -71,6 +71,7 @@ class EventType(Enum):
     IAQ_DATA = auto()
     CO2_DATA = auto()
     PWMT_CONF_ACK = auto()
+    PWMT_DATA = auto()
     PWMT_STATUS = auto()
     PWMT_VOLTAGES = auto()
     PWMT_FREQUENCIES = auto()
