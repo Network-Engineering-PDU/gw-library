@@ -28,7 +28,7 @@ setup(
     packages=find_namespace_packages(include=["ttgwlib", "ttgwlib.*"]),
     install_requires=[
         "pyserial>=3.5",
-        "cryptography>=36.0.0",
+        "cryptography>=38.0.0",
         "packaging>=21.0",
     ],
     extras_require={
