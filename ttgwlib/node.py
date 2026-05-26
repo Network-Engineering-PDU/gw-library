@@ -1,4 +1,5 @@
 from enum import Enum
+from typing import Optional
 
 class Boards(Enum):
     """ This class represents a board type.
@@ -125,7 +126,7 @@ class Node:
         return 0
 
     @property
-    def board(self) -> Boards | None:
+    def board(self) -> Optional[Boards]:
         if self.board_id in BOARD_IDS:
             return BOARD_IDS[self.board_id]
         return None
