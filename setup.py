@@ -27,9 +27,9 @@ setup(
     long_description_content_type="text/markdown",
     packages=find_namespace_packages(include=["ttgwlib", "ttgwlib.*"]),
     install_requires=[
-        "pyserial==3.5",
-        "cryptography==36.0.2",
-        "packaging==24.2",
+        "pyserial>=3.5",
+        "cryptography>=36.0.0",
+        "packaging>=21.0",
     ],
     extras_require={
         "boto3": ["boto3==1.20.12"],
