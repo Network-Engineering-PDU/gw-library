@@ -69,3 +69,4 @@ gw_config = Config(node_db, "desktop", port=None,
 gt = Gateway()
 gt.init(gw_config)
 gt.set_sleep_time(SLEEP_PERIOD)
+gt.start()

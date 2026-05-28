@@ -83,7 +83,7 @@ class GatewayManager:
             gt = Gateway()
             gt.init(config)
             #gt.start_scan(["DA51"])
-            gt.start_scan()
+            gt.start_scan(["DA51", "0639"])
 
             while True:
                 time.sleep(60)
