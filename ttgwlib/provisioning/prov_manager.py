@@ -108,16 +108,17 @@ class ProvManager:
             # Method 1: Try hcitool lescan (simpler output format)
             self.logger.info("Host fallback: attempt 1 - trying hcitool lescan for %s s", scan_time)
             try:
-                cmd = f"timeout {scan_time} hcitool lescan"
+                cmd = f"timeout {scan_time} hcitool lescan --duplicates"
                 proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE,
-                                       stderr=subprocess.PIPE, text=True)
-                out, err = proc.communicate(timeout=scan_time+2)
+                                       stderr=subprocess.STDOUT, text=True)
+                out, _ = proc.communicate(timeout=scan_time+2)
                 out = out or ""
                 
                 self.logger.debug("hcitool lescan output (len=%d): %s...", len(out),
                                  out[:300].replace('\n', ' ') if out else "(empty)")
                 
-                # Parse lines like "AA:BB:CC:DD:EE:FF (unknown)" or "AA:BB:CC:DD:EE:FF BeaconX Pro"
+                # Parse lines like "AA:BB:CC:DD:EE:FF (unknown)", "AA:BB:CC:DD:EE:FF BeaconX Pro",
+                # or "AA:BB:CC:DD:EE:FF BeaconX Pro -55 dBm" when RSSI is present.
                 dev_re = re.compile(r"([0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:"
                                    r"[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2})")
                 
@@ -131,8 +132,10 @@ class ProvManager:
                     if mac in seen_macs:
                         continue
                     seen_macs.add(mac)
-                    self.logger.debug("hcitool lescan found: %s from line: %s", mac, line.strip())
-                    self._emit_device(mac)
+                    rssi = self._parse_rssi_from_line(line)
+                    self.logger.debug("hcitool lescan found: %s (rssi=%s) from line: %s",
+                                      mac, rssi, line.strip())
+                    self._emit_device(mac, rssi)
                 
                 if seen_macs:
                     self.logger.info("Host fallback: hcitool lescan found %d devices", len(seen_macs))
@@ -157,8 +160,11 @@ class ProvManager:
                                  out[:300].replace('\n', ' ') if out else "(empty)")
                 
                 # bluetoothctl prints lines like "[NEW] Device AA:BB:CC:DD:EE:FF Name"
+                # Some builds may include RSSI information in the same scan output.
                 dev_re = re.compile(r"Device\s+([0-9A-Fa-f:]{17})")
                 for line in out.splitlines():
+                    if not self._is_probably_ble_device(line):
+                        continue
                     m = dev_re.search(line)
                     if not m:
                         continue
@@ -166,8 +172,10 @@ class ProvManager:
                     if mac in seen_macs:
                         continue
                     seen_macs.add(mac)
-                    self.logger.debug("bluetoothctl found: %s from line: %s", mac, line.strip())
-                    self._emit_device(mac)
+                    rssi = self._parse_rssi_from_line(line)
+                    self.logger.debug("bluetoothctl found: %s (rssi=%s) from line: %s",
+                                      mac, rssi, line.strip())
+                    self._emit_device(mac, rssi)
                 
                 if seen_macs:
                     self.logger.info("Host fallback: bluetoothctl found %d devices", len(seen_macs))
@@ -213,27 +221,47 @@ class ProvManager:
         except Exception:
             self.logger.exception("Error during host fallback bluetooth scan")
 
-    def _emit_device(self, mac_str):
+    def _parse_rssi_from_line(self, line):
+        if not line:
+            return None
+        # Prefer explicit RSSI labels, then dBm, then numeric trailing parentheses.
+        patterns = [
+            r"RSSI:\s*(-?\d+)",
+            r"(-?\d+)\s*dBm",
+            r"\((-?\d+)\)\s*$",
+        ]
+        for pat in patterns:
+            m = re.search(pat, line, re.IGNORECASE)
+            if m:
+                try:
+                    return int(m.group(1))
+                except ValueError:
+                    return None
+        return None
+
+    def _is_probably_ble_device(self, line):
+        if not line:
+            return False
+        lower = line.lower()
+        blacklist = [
+            'tv', 'phone', 'headphone', 'headset', 'speaker', 'audio',
+            'keyboard', 'mouse', 'laptop', 'desktop', 'tablet', 'watch',
+            'camera', 'printer', 'car', 'remote', 'gamepad', 'smartphone',
+            'console', 'bluetooth', 'samsung', 'sony', 'lg'
+        ]
+        for token in blacklist:
+            if token in lower:
+                return False
+        return True
+
+    def _emit_device(self, mac_str, rssi=None):
         """Emit a synthetic UNPROV_DISC event for a discovered MAC address.
         
         :param mac_str: MAC address string like "AA:BB:CC:DD:EE:FF"
+        :param rssi: Optional RSSI value (in dBm, typically -100 to 0)
         """
         try:
             adv_addr = bytes.fromhex(mac_str.replace(':', ''))
-            
-            # Try to fetch RSSI using bluetoothctl info
-            rssi = None
-            try:
-                proc = subprocess.run(
-                    f"bluetoothctl info {mac_str}",
-                    shell=True, capture_output=True, text=True, timeout=2
-                )
-                info_out = proc.stdout or ""
-                rssi_match = re.search(r"RSSI:\s+(-?\d+)", info_out)
-                if rssi_match:
-                    rssi = int(rssi_match.group(1))
-            except Exception:
-                pass
             
             data = {
                 "uuid": None,
