@@ -16,7 +16,8 @@ CO2_PERIOD       = 300 # Hardcoded in FW
 PWMT_PERIOD      = 60
 
 
-uuid_filter = ["DA51"]
+#uuid_filter = ["DA51"]
+uuid_filter = ['DA51', '0639']
 mac_filter = ["FFF569011540"]
 
 
