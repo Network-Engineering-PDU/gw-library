@@ -95,48 +95,159 @@ class ProvManager:
         self.scanned_nodes = []
 
     def _host_scan_and_emit(self, scan_time=5):
-        """Run a short bluetoothctl scan and inject UNPROV_DISC events.
+        """Run a short host-side BLE scan and inject UNPROV_DISC events.
 
-        :param scan_time: seconds to run bluetoothctl scan
+        Attempts multiple scan methods: hcitool lescan, bluetoothctl, hcitool scan.
+        
+        :param scan_time: seconds to run scan
         """
+        seen_macs = set()
+        scan_time = int(scan_time)
+        
         try:
-            cmd = (
-                f"timeout {int(scan_time)} bluetoothctl << 'EOF'\n"
-                "scan on\n"
-                "quit\n"
-                "EOF"
-            )
-            self.logger.info("Host fallback scan: running bluetoothctl for %s s",
-                             scan_time)
-            proc = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-            out = proc.stdout or ""
-            # Parse lines like: "Device AA:BB:CC:DD:EE:FF Name"
-            dev_re = re.compile(r"Device\s+([0-9A-Fa-f:]{17})(?:\s+(.*))?")
-            seen = set()
-            for line in out.splitlines():
-                m = dev_re.search(line)
-                if not m:
-                    continue
-                mac = m.group(1).upper()
-                if mac in seen:
-                    continue
-                seen.add(mac)
-                try:
-                    adv_addr = bytes.fromhex(mac.replace(':', ''))
-                except Exception:
-                    continue
-                data = {
-                    "uuid": None,
-                    "rssi": None,
-                    "gatt_supported": False,
-                    "adv_addr_type": 0,
-                    "adv_addr": adv_addr,
-                }
-                evt = Event(EventType.UNPROV_DISC, data, self.gw)
-                self.gw.event_handler.add_event(evt)
-                self.logger.info("Host fallback: emitted UNPROV_DISC for %s", mac)
+            # Method 1: Try hcitool lescan (simpler output format)
+            self.logger.info("Host fallback: attempt 1 - trying hcitool lescan for %s s", scan_time)
+            try:
+                cmd = f"timeout {scan_time} hcitool lescan"
+                proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE,
+                                       stderr=subprocess.PIPE, text=True)
+                out, err = proc.communicate(timeout=scan_time+2)
+                out = out or ""
+                
+                self.logger.debug("hcitool lescan output (len=%d): %s...", len(out),
+                                 out[:300].replace('\n', ' ') if out else "(empty)")
+                
+                # Parse lines like "AA:BB:CC:DD:EE:FF (unknown)" or "AA:BB:CC:DD:EE:FF BeaconX Pro"
+                dev_re = re.compile(r"([0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:"
+                                   r"[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2})")
+                
+                for line in out.splitlines():
+                    if not line.strip() or "LE Scan" in line:
+                        continue
+                    m = dev_re.search(line)
+                    if not m:
+                        continue
+                    mac = m.group(1).upper()
+                    if mac in seen_macs:
+                        continue
+                    seen_macs.add(mac)
+                    self.logger.debug("hcitool lescan found: %s from line: %s", mac, line.strip())
+                    self._emit_device(mac)
+                
+                if seen_macs:
+                    self.logger.info("Host fallback: hcitool lescan found %d devices", len(seen_macs))
+                    return
+            except Exception as e:
+                self.logger.debug("hcitool lescan failed: %s", e)
+            
+            # Method 2: Try bluetoothctl scan with direct shell
+            self.logger.info("Host fallback: attempt 2 - trying bluetoothctl for %s s", scan_time)
+            try:
+                # Run bluetoothctl with explicit timeout and direct scan
+                cmd = (
+                    f"(echo 'scan on'; sleep {scan_time}; echo 'quit') | "
+                    f"timeout {scan_time+2} bluetoothctl 2>&1"
+                )
+                proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE,
+                                       stderr=subprocess.PIPE, text=True)
+                out, err = proc.communicate(timeout=scan_time+3)
+                out = out or ""
+                
+                self.logger.debug("bluetoothctl output (len=%d): %s...", len(out),
+                                 out[:300].replace('\n', ' ') if out else "(empty)")
+                
+                # bluetoothctl prints lines like "[NEW] Device AA:BB:CC:DD:EE:FF Name"
+                dev_re = re.compile(r"Device\s+([0-9A-Fa-f:]{17})")
+                for line in out.splitlines():
+                    m = dev_re.search(line)
+                    if not m:
+                        continue
+                    mac = m.group(1).upper()
+                    if mac in seen_macs:
+                        continue
+                    seen_macs.add(mac)
+                    self.logger.debug("bluetoothctl found: %s from line: %s", mac, line.strip())
+                    self._emit_device(mac)
+                
+                if seen_macs:
+                    self.logger.info("Host fallback: bluetoothctl found %d devices", len(seen_macs))
+                    return
+            except Exception as e:
+                self.logger.debug("bluetoothctl failed: %s", e)
+            
+            # Method 3: Try hcitool scan (generic BLE discovery, slower)
+            self.logger.info("Host fallback: attempt 3 - trying hcitool scan for %s s", scan_time)
+            try:
+                cmd = f"timeout {scan_time} hcitool scan"
+                proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE,
+                                       stderr=subprocess.PIPE, text=True)
+                out, err = proc.communicate(timeout=scan_time+2)
+                out = out or ""
+                
+                self.logger.debug("hcitool scan output (len=%d): %s...", len(out),
+                                 out[:300].replace('\n', ' ') if out else "(empty)")
+                
+                dev_re = re.compile(r"([0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:"
+                                   r"[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2})")
+                for line in out.splitlines():
+                    if not line.strip() or "Scanning" in line:
+                        continue
+                    m = dev_re.search(line)
+                    if not m:
+                        continue
+                    mac = m.group(1).upper()
+                    if mac in seen_macs:
+                        continue
+                    seen_macs.add(mac)
+                    self.logger.debug("hcitool scan found: %s", mac)
+                    self._emit_device(mac)
+                
+                if seen_macs:
+                    self.logger.info("Host fallback: hcitool scan found %d devices", len(seen_macs))
+                    return
+            except Exception as e:
+                self.logger.debug("hcitool scan failed: %s", e)
+            
+            self.logger.info("Host fallback: all scan methods completed, %d unique devices found", len(seen_macs))
+                
         except Exception:
             self.logger.exception("Error during host fallback bluetooth scan")
+
+    def _emit_device(self, mac_str):
+        """Emit a synthetic UNPROV_DISC event for a discovered MAC address.
+        
+        :param mac_str: MAC address string like "AA:BB:CC:DD:EE:FF"
+        """
+        try:
+            adv_addr = bytes.fromhex(mac_str.replace(':', ''))
+            
+            # Try to fetch RSSI using bluetoothctl info
+            rssi = None
+            try:
+                proc = subprocess.run(
+                    f"bluetoothctl info {mac_str}",
+                    shell=True, capture_output=True, text=True, timeout=2
+                )
+                info_out = proc.stdout or ""
+                rssi_match = re.search(r"RSSI:\s+(-?\d+)", info_out)
+                if rssi_match:
+                    rssi = int(rssi_match.group(1))
+            except Exception:
+                pass
+            
+            data = {
+                "uuid": None,
+                "rssi": rssi,
+                "gatt_supported": False,
+                "adv_addr_type": 0,
+                "adv_addr": adv_addr,
+            }
+            evt = Event(EventType.UNPROV_DISC, data, self.gw)
+            self.gw.event_handler.add_event(evt)
+            self.logger.info("Host fallback: emitted UNPROV_DISC for %s (rssi=%s)", 
+                           mac_str, rssi)
+        except Exception:
+            self.logger.exception("Error emitting device %s", mac_str)
 
     def provision(self, node):
         if self.provisioning:
