@@ -102,6 +102,7 @@ class ProvManager:
         :param scan_time: seconds to run scan
         """
         seen_macs = set()
+        devices = {}
         scan_time = int(scan_time)
         
         try:
@@ -135,10 +136,13 @@ class ProvManager:
                     rssi = self._parse_rssi_from_line(line)
                     self.logger.debug("hcitool lescan found: %s (rssi=%s) from line: %s",
                                       mac, rssi, line.strip())
-                    self._emit_device(mac, rssi)
+                    devices[mac] = {"rssi": rssi}
                 
                 if seen_macs:
                     self.logger.info("Host fallback: hcitool lescan found %d devices", len(seen_macs))
+                    for mac, info in devices.items():
+                        self._emit_device(mac, rssi=info.get("rssi"),
+                                          additional_data=self._fetch_device_info(mac))
                     return
             except Exception as e:
                 self.logger.debug("hcitool lescan failed: %s", e)
@@ -175,10 +179,13 @@ class ProvManager:
                     rssi = self._parse_rssi_from_line(line)
                     self.logger.debug("bluetoothctl found: %s (rssi=%s) from line: %s",
                                       mac, rssi, line.strip())
-                    self._emit_device(mac, rssi)
+                    devices[mac] = {"rssi": rssi}
                 
                 if seen_macs:
                     self.logger.info("Host fallback: bluetoothctl found %d devices", len(seen_macs))
+                    for mac, info in devices.items():
+                        self._emit_device(mac, rssi=info.get("rssi"),
+                                          additional_data=self._fetch_device_info(mac))
                     return
             except Exception as e:
                 self.logger.debug("bluetoothctl failed: %s", e)
@@ -203,15 +210,20 @@ class ProvManager:
                     m = dev_re.search(line)
                     if not m:
                         continue
+                    if not self._is_probably_ble_device(line):
+                        continue
                     mac = m.group(1).upper()
                     if mac in seen_macs:
                         continue
                     seen_macs.add(mac)
                     self.logger.debug("hcitool scan found: %s", mac)
-                    self._emit_device(mac)
+                    devices[mac] = {"rssi": None}
                 
                 if seen_macs:
                     self.logger.info("Host fallback: hcitool scan found %d devices", len(seen_macs))
+                    for mac, info in devices.items():
+                        self._emit_device(mac, rssi=info.get("rssi"),
+                                          additional_data=self._fetch_device_info(mac))
                     return
             except Exception as e:
                 self.logger.debug("hcitool scan failed: %s", e)
@@ -239,6 +251,82 @@ class ProvManager:
                     return None
         return None
 
+    def _fetch_device_info(self, mac):
+        """Fetch advertisement details from bluetoothctl info for a discovered device."""
+        info = {
+            "local_name": None,
+            "manufacturer_data": {},
+            "service_data": {},
+        }
+        try:
+            cmd = f"(echo 'info {mac}'; echo 'quit') | timeout 6 bluetoothctl 2>&1"
+            proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT, text=True)
+            out, _ = proc.communicate(timeout=8)
+            if not out:
+                return info
+
+            current_key = None
+            for line in out.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                if line.startswith("Name:"):
+                    info["local_name"] = line.split(":", 1)[1].strip()
+                    current_key = None
+                    continue
+                if line.startswith("Alias:") and not info["local_name"]:
+                    info["local_name"] = line.split(":", 1)[1].strip()
+                    continue
+                if line.startswith("ManufacturerData Key:"):
+                    key_text = line.split(":", 1)[1].strip()
+                    try:
+                        key = int(key_text, 16)
+                    except ValueError:
+                        current_key = None
+                        continue
+                    info["manufacturer_data"].setdefault(key, b"")
+                    current_key = ("manufacturer_data", key)
+                    continue
+                if line.startswith("ServiceData Key:") or line.startswith("ServiceData UUID:"):
+                    key_text = line.split(":", 1)[1].strip()
+                    key = self._normalize_service_data_key(key_text)
+                    info["service_data"].setdefault(key, b"")
+                    current_key = ("service_data", key)
+                    continue
+                if current_key and line.startswith("0x"):
+                    payload = b"".join(
+                        bytes([int(byte, 16)]) for byte in re.findall(r"0x([0-9A-Fa-f]{2})", line)
+                    )
+                    info[current_key[0]][current_key[1]] += payload
+                    continue
+                if current_key:
+                    tokens = line.split()
+                    if all(len(tok) == 2 and all(c in "0123456789abcdefABCDEF" for c in tok) for tok in tokens):
+                        try:
+                            info[current_key[0]][current_key[1]] += bytes.fromhex("".join(tokens))
+                        except ValueError:
+                            pass
+                        continue
+                    current_key = None
+        except Exception:
+            self.logger.debug("Host fallback: bluetoothctl info parse failed for %s", mac,
+                              exc_info=True)
+        return info
+
+    def _normalize_service_data_key(self, key_text):
+        key_text = key_text.strip().lower()
+        if key_text.startswith("0x"):
+            return key_text[2:]
+        uuid = key_text.replace("-", "")
+        if len(uuid) == 4 and all(c in "0123456789abcdef" for c in uuid):
+            return uuid
+        if uuid.endswith("feab"):
+            return "feab"
+        if uuid.startswith("0000") and len(uuid) >= 8:
+            return uuid[4:8]
+        return uuid
+
     def _is_probably_ble_device(self, line):
         if not line:
             return False
@@ -247,18 +335,19 @@ class ProvManager:
             'tv', 'phone', 'headphone', 'headset', 'speaker', 'audio',
             'keyboard', 'mouse', 'laptop', 'desktop', 'tablet', 'watch',
             'camera', 'printer', 'car', 'remote', 'gamepad', 'smartphone',
-            'console', 'bluetooth', 'samsung', 'sony', 'lg'
+            'console', 'bluetooth'
         ]
         for token in blacklist:
             if token in lower:
                 return False
         return True
 
-    def _emit_device(self, mac_str, rssi=None):
+    def _emit_device(self, mac_str, rssi=None, additional_data=None):
         """Emit a synthetic UNPROV_DISC event for a discovered MAC address.
         
         :param mac_str: MAC address string like "AA:BB:CC:DD:EE:FF"
         :param rssi: Optional RSSI value (in dBm, typically -100 to 0)
+        :param additional_data: Optional dict of additional advertisement fields.
         """
         try:
             adv_addr = bytes.fromhex(mac_str.replace(':', ''))
@@ -270,10 +359,13 @@ class ProvManager:
                 "adv_addr_type": 0,
                 "adv_addr": adv_addr,
             }
+            if isinstance(additional_data, dict):
+                data.update(additional_data)
             evt = Event(EventType.UNPROV_DISC, data, self.gw)
             self.gw.event_handler.add_event(evt)
-            self.logger.info("Host fallback: emitted UNPROV_DISC for %s (rssi=%s)", 
-                           mac_str, rssi)
+            self.logger.info("Host fallback: emitted UNPROV_DISC for %s (rssi=%s) info=%s", 
+                             mac_str, rssi,
+                             {k: v for k, v in data.items() if k in ["local_name", "manufacturer_data", "service_data"]})
         except Exception:
             self.logger.exception("Error emitting device %s", mac_str)
 
