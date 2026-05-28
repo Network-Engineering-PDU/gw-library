@@ -1,4 +1,9 @@
 import logging
+import subprocess
+import threading
+import re
+
+from ttgwlib.events.event import Event
 
 from ttgwlib.node import Node
 from ttgwlib.provisioning.provisioner import Provisioner
@@ -76,7 +81,62 @@ class ProvManager:
             self.logger.info("Scan stopped. Discovered devices: %s", devices)
         else:
             self.logger.info("Scan stopped. No unprovisioned devices discovered.")
+            # Fallback: attempt a short host-side bluetoothctl scan and emit
+            # synthetic UNPROV_DISC events for discovered BLE devices. This
+            # helps surface generic beacons (MST01 / BeaconX Pro) that the
+            # firmware's provisioner may ignore.
+            try:
+                t = threading.Thread(target=self._host_scan_and_emit,
+                                     args=(5,))
+                t.daemon = True
+                t.start()
+            except Exception:
+                self.logger.exception("Host scan fallback failed to start")
         self.scanned_nodes = []
+
+    def _host_scan_and_emit(self, scan_time=5):
+        """Run a short bluetoothctl scan and inject UNPROV_DISC events.
+
+        :param scan_time: seconds to run bluetoothctl scan
+        """
+        try:
+            cmd = (
+                f"timeout {int(scan_time)} bluetoothctl << 'EOF'\n"
+                "scan on\n"
+                "quit\n"
+                "EOF"
+            )
+            self.logger.info("Host fallback scan: running bluetoothctl for %s s",
+                             scan_time)
+            proc = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            out = proc.stdout or ""
+            # Parse lines like: "Device AA:BB:CC:DD:EE:FF Name"
+            dev_re = re.compile(r"Device\s+([0-9A-Fa-f:]{17})(?:\s+(.*))?")
+            seen = set()
+            for line in out.splitlines():
+                m = dev_re.search(line)
+                if not m:
+                    continue
+                mac = m.group(1).upper()
+                if mac in seen:
+                    continue
+                seen.add(mac)
+                try:
+                    adv_addr = bytes.fromhex(mac.replace(':', ''))
+                except Exception:
+                    continue
+                data = {
+                    "uuid": None,
+                    "rssi": None,
+                    "gatt_supported": False,
+                    "adv_addr_type": 0,
+                    "adv_addr": adv_addr,
+                }
+                evt = Event(EventType.UNPROV_DISC, data, self.gw)
+                self.gw.event_handler.add_event(evt)
+                self.logger.info("Host fallback: emitted UNPROV_DISC for %s", mac)
+        except Exception:
+            self.logger.exception("Error during host fallback bluetooth scan")
 
     def provision(self, node):
         if self.provisioning:
