@@ -16,8 +16,7 @@ CO2_PERIOD       = 300 # Hardcoded in FW
 PWMT_PERIOD      = 60
 
 
-#uuid_filter = ["DA51"]
-uuid_filter = ['DA51', '0639']
+uuid_filter = ["DA51"]
 mac_filter = ["FFF569011540"]
 
 
@@ -69,4 +68,3 @@ gw_config = Config(node_db, "desktop", port=None,
 gt = Gateway()
 gt.init(gw_config)
 gt.set_sleep_time(SLEEP_PERIOD)
-gt.start()

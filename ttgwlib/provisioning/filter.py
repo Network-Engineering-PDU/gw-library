@@ -19,8 +19,6 @@ class ScanFilter:
         return False
 
     def check(self, node):
-        if not self.uuid_filters and not self.mac_filters:
-            return True
         for uuid in self.uuid_filters:
             if self.uuid_filter(uuid, node):
                 return True
