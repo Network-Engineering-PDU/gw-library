@@ -49,9 +49,17 @@ class ProvUnprovisionedReceived(Event):
             beacon.
         adv_addr : uint8_t[6]
             The advertisement address of the sender of the unprovisioned beacon.
+        manufacturer_data : dict (optional)
+            Manufacturer-specific data from BLE advertisement.
+            Keys are company IDs (int), values are raw bytes.
     """
     def __init__(self, raw_data, gw):
-        data_unpacked = struct.unpack("<16sbBB6s", raw_data)
+        # Parse fixed fields (25 bytes minimum)
+        if len(raw_data) < 25:
+            data_unpacked = struct.unpack("<16sbBB6s", raw_data)
+        else:
+            data_unpacked = struct.unpack("<16sbBB6s", raw_data[:25])
+        
         data = {}
         data["uuid"] = data_unpacked[0]
         data["rssi"] = data_unpacked[1]
@@ -60,6 +68,20 @@ class ProvUnprovisionedReceived(Event):
         adv_addr = bytearray(data_unpacked[4])
         adv_addr.reverse()
         data["adv_addr"] = bytes(adv_addr)
+        
+        # Parse manufacturer data if present (variable length after fixed fields)
+        if len(raw_data) > 25:
+            manufacturer_bytes = bytes(raw_data[25:])
+            # Parse TLV-like manufacturer data format: [company_id_low, company_id_high, ...payload...]
+            if len(manufacturer_bytes) >= 2:
+                company_id = manufacturer_bytes[0] | (manufacturer_bytes[1] << 8)
+                payload = manufacturer_bytes[2:] if len(manufacturer_bytes) > 2 else b''
+                data["manufacturer_data"] = {company_id: payload}
+            else:
+                data["manufacturer_data"] = {}
+        else:
+            data["manufacturer_data"] = {}
+        
         super().__init__(EventType.UNPROV_DISC, data, gw)
 
 
